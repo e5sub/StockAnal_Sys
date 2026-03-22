@@ -2090,89 +2090,116 @@ def start_agent_analysis():
         def run_agent_analysis():
             """在后台线程中运行智能体分析"""
             try:
-                from tradingagents.graph.trading_graph import TradingAgentsGraph
-                from tradingagents.default_config import DEFAULT_CONFIG
-                
-                update_task_status('agent_analysis', task_id, TASK_RUNNING, progress=5, result={'current_step': '正在初始化智能体...'})
+                # 特性开关：使用新Agent系统或旧TradingAgents
+                use_new_agent = os.getenv('USE_AGENT_SYSTEM', 'true').lower() == 'true'
 
-                # --- 修复 Start: 强制使用主应用的OpenAI代理配置 ---
-                config = DEFAULT_CONFIG.copy()
-                config['llm_provider'] = 'openai'
-                config['backend_url'] = os.getenv('OPENAI_API_URL')
-                main_model = os.getenv('OPENAI_API_MODEL', 'gpt-4o')
-                config['deep_think_llm'] = main_model
-                config['quick_think_llm'] = main_model
-                config['memory_enabled'] = enable_memory
-                config['max_tokens'] = max_output_length
-                
-                if not os.getenv('OPENAI_API_KEY'):
-                    raise ValueError("主应用的 OPENAI_API_KEY 未在.env文件中设置")
+                if use_new_agent:
+                    # === 新Agent系统（LangGraph编排） ===
+                    from app.agents.coordinator import run_agent_analysis as agent_run
 
-                app.logger.info(f"强制使用主应用代理配置进行智能体分析: provider={config['llm_provider']}, url={config['backend_url']}, model={config['deep_think_llm']}")
+                    update_task_status('agent_analysis', task_id, TASK_RUNNING, progress=5, result={'current_step': '正在初始化多Agent分析系统...'})
 
-                ta = TradingAgentsGraph(
-                    selected_analysts=selected_analysts,
-                    debug=True, 
-                    config=config
-                )
-                # --- 修复 End ---
-                
-                def progress_callback(progress, step):
-                    current_task = agent_session_manager.load_task(task_id)
-                    if not current_task or current_task.get('status') == TASK_CANCELLED:
-                         raise TaskCancelledException(f"任务 {task_id} 已被用户取消")
-                    update_task_status('agent_analysis', task_id, TASK_RUNNING, progress=progress, result={'current_step': step})
+                    result_state = agent_run(
+                        stock_code=stock_code,
+                        market_type=market_type,
+                        research_depth=research_depth,
+                        selected_analysts=selected_analysts
+                    )
 
-                today = analysis_date or datetime.now().strftime('%Y-%m-%d')
+                    # 获取公司名称
+                    try:
+                        stock_info = analyzer.get_stock_info(stock_code)
+                        stock_name = stock_info.get('股票名称', '未知')
+                        result_state['company_name'] = stock_name
+                    except Exception as e:
+                        app.logger.error(f"获取公司名称时出错: {e}")
+                        result_state['company_name'] = '名称获取失败'
 
-                # Issue #34 修复: 检查propagate方法签名，兼容不同版本的tradingagents库
-                import inspect
-                propagate_sig = inspect.signature(ta.propagate)
-                propagate_params = propagate_sig.parameters
+                    # 构造前端期望的decision格式
+                    final_decision = result_state.get('final_decision', {})
+                    decision_obj = {
+                        'action': final_decision.get('action', 'HOLD'),
+                        'reasoning': final_decision.get('reasoning', '分析完成'),
+                        'confidence': final_decision.get('confidence', 0.5),
+                        'risk_score': 1.0 - final_decision.get('confidence', 0.5)
+                    }
 
-                kwargs = {}
-                if 'market_type' in propagate_params:
-                    kwargs['market_type'] = market_type
-                if 'progress_callback' in propagate_params:
-                    kwargs['progress_callback'] = progress_callback
+                    update_task_status('agent_analysis', task_id, TASK_COMPLETED, progress=100, result={
+                        'decision': decision_obj,
+                        'final_state': result_state,
+                        'current_step': '多Agent分析完成',
+                        'execution_log': result_state.get('execution_log', []),
+                        'errors': result_state.get('errors', [])
+                    })
+                    app.logger.info(f"Agent分析任务 {task_id} 完成 (新系统)")
 
-                # 由于tradingagents库不支持progress_callback，手动更新进度
-                update_task_status('agent_analysis', task_id, TASK_RUNNING, progress=30, result={'current_step': '正在进行多智能体分析...'})
-                state, raw_decision = ta.propagate(stock_code, today, **kwargs)
-                update_task_status('agent_analysis', task_id, TASK_RUNNING, progress=90, result={'current_step': '正在生成分析报告...'})
+                else:
+                    # === 旧TradingAgents系统（保持兼容） ===
+                    from tradingagents.graph.trading_graph import TradingAgentsGraph
+                    from tradingagents.default_config import DEFAULT_CONFIG
 
-                # 修复：在任务完成时，获取并添加公司名称到最终结果中
-                try:
-                    stock_info = analyzer.get_stock_info(stock_code)
-                    stock_name = stock_info.get('股票名称', '未知')
-                    if isinstance(state, dict):
-                        state['company_name'] = stock_name
-                except Exception as e:
-                    app.logger.error(f"为 {stock_code} 获取公司名称时出错: {e}")
-                    if isinstance(state, dict):
-                        state['company_name'] = '名称获取失败'
+                    update_task_status('agent_analysis', task_id, TASK_RUNNING, progress=5, result={'current_step': '正在初始化智能体...'})
 
-                # 构造前端期望的decision对象格式
-                final_trade_decision = state.get('final_trade_decision', '') if isinstance(state, dict) else ''
-                action = raw_decision.strip().upper() if raw_decision else 'HOLD'
-                if action not in ['BUY', 'SELL', 'HOLD']:
-                    # 尝试从final_trade_decision中提取
-                    if 'BUY' in final_trade_decision.upper():
-                        action = 'BUY'
-                    elif 'SELL' in final_trade_decision.upper():
-                        action = 'SELL'
-                    else:
-                        action = 'HOLD'
+                    config = DEFAULT_CONFIG.copy()
+                    config['llm_provider'] = 'openai'
+                    config['backend_url'] = os.getenv('OPENAI_API_URL')
+                    main_model = os.getenv('OPENAI_API_MODEL', 'gpt-4o')
+                    config['deep_think_llm'] = main_model
+                    config['quick_think_llm'] = main_model
+                    config['memory_enabled'] = enable_memory
+                    config['max_tokens'] = max_output_length
 
-                decision_obj = {
-                    'action': action,
-                    'reasoning': final_trade_decision[:500] if final_trade_decision else '分析完成',
-                    'confidence': 0.7,
-                    'risk_score': 0.5
-                }
+                    if not os.getenv('OPENAI_API_KEY'):
+                        raise ValueError("OPENAI_API_KEY 未在.env文件中设置")
 
-                update_task_status('agent_analysis', task_id, TASK_COMPLETED, progress=100, result={'decision': decision_obj, 'final_state': state, 'current_step': '分析完成'})
-                app.logger.info(f"智能体分析任务 {task_id} 完成")
+                    ta = TradingAgentsGraph(
+                        selected_analysts=selected_analysts,
+                        debug=True,
+                        config=config
+                    )
+
+                    today = analysis_date or datetime.now().strftime('%Y-%m-%d')
+
+                    import inspect
+                    propagate_sig = inspect.signature(ta.propagate)
+                    propagate_params = propagate_sig.parameters
+                    kwargs = {}
+                    if 'market_type' in propagate_params:
+                        kwargs['market_type'] = market_type
+
+                    update_task_status('agent_analysis', task_id, TASK_RUNNING, progress=30, result={'current_step': '正在进行多智能体分析...'})
+                    state, raw_decision = ta.propagate(stock_code, today, **kwargs)
+                    update_task_status('agent_analysis', task_id, TASK_RUNNING, progress=90, result={'current_step': '正在生成分析报告...'})
+
+                    try:
+                        stock_info = analyzer.get_stock_info(stock_code)
+                        stock_name = stock_info.get('股票名称', '未知')
+                        if isinstance(state, dict):
+                            state['company_name'] = stock_name
+                    except Exception as e:
+                        app.logger.error(f"获取公司名称时出错: {e}")
+                        if isinstance(state, dict):
+                            state['company_name'] = '名称获取失败'
+
+                    final_trade_decision = state.get('final_trade_decision', '') if isinstance(state, dict) else ''
+                    action = raw_decision.strip().upper() if raw_decision else 'HOLD'
+                    if action not in ['BUY', 'SELL', 'HOLD']:
+                        if 'BUY' in final_trade_decision.upper():
+                            action = 'BUY'
+                        elif 'SELL' in final_trade_decision.upper():
+                            action = 'SELL'
+                        else:
+                            action = 'HOLD'
+
+                    decision_obj = {
+                        'action': action,
+                        'reasoning': final_trade_decision[:500] if final_trade_decision else '分析完成',
+                        'confidence': 0.7,
+                        'risk_score': 0.5
+                    }
+
+                    update_task_status('agent_analysis', task_id, TASK_COMPLETED, progress=100, result={'decision': decision_obj, 'final_state': state, 'current_step': '分析完成'})
+                    app.logger.info(f"智能体分析任务 {task_id} 完成 (旧系统)")
 
             except TaskCancelledException as e:
                 app.logger.info(str(e))
