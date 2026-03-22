@@ -2063,6 +2063,12 @@ def start_agent_analysis():
         if not stock_code:
             return jsonify({'error': '请提供股票代码'}), 400
 
+        # 验证股票代码格式
+        is_valid, validated_code = validate_stock_code(stock_code, market_type)
+        if not is_valid:
+            return jsonify({'error': validated_code}), 400
+        stock_code = validated_code
+
         # 创建新任务
         task_id = generate_task_id()
         task = {
