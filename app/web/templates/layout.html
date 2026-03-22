@@ -856,6 +856,24 @@
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <!-- Common JS -->
     <script>
+        // 全局AJAX超时设置
+        $.ajaxSetup({
+            timeout: 60000,  // 60秒全局超时
+            error: function(xhr, status, error) {
+                if (status === 'timeout') {
+                    console.error('请求超时，请检查网络连接');
+                }
+            }
+        });
+
+        // 全局XSS防护：HTML转义函数
+        function escapeHtml(text) {
+            if (!text) return '';
+            var div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
         // 显示加载中覆盖层
         function showLoading() {
             $('#loading-overlay').css('display', 'flex');

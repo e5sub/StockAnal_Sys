@@ -44,9 +44,9 @@ class NewsFetcher:
     def _load_existing_hashes(self):
         """加载已有文件中的新闻哈希值"""
         try:
-            # 获取最近3天的文件来加载哈希值
+            # 获取最近7天的文件来加载哈希值
             today = datetime.now()
-            for i in range(3):  # 检查今天和前两天的数据
+            for i in range(7):  # 检查最近7天的数据
                 date = today - timedelta(days=i)
                 filename = self.get_news_filename(date)
 
@@ -65,16 +65,25 @@ class NewsFetcher:
                             logger.warning(f"文件 {filename} 格式错误，跳过加载哈希值")
 
             logger.info(f"已加载 {len(self.news_hashes)} 条新闻哈希值")
+
+            # 限制哈希集合大小，防止内存无限增长
+            MAX_HASHES = 50000
+            if len(self.news_hashes) > MAX_HASHES:
+                # 保留最近的哈希（集合无序，但控制上限）
+                self.news_hashes = set(list(self.news_hashes)[-MAX_HASHES:])
+                logger.info(f"哈希集合超过上限，已截断至 {MAX_HASHES} 条")
+
         except Exception as e:
-            logger.error(f"加载现有新闻哈希值时出错: {str(e)}")
-            # 出错时清空哈希集合，保证程序可以继续运行
-            self.news_hashes = set()
+            logger.error(f"加载新闻哈希时出错: {str(e)}")
+            # 不清空已加载的哈希，保留部分去重能力
 
     def _calculate_hash(self, content):
-        """计算新闻内容的哈希值"""
-        # 使用MD5哈希算法计算内容的哈希值
-        # 对于财经新闻，内容通常是唯一的标识，所以只对内容计算哈希
-        return hashlib.md5(str(content).encode('utf-8')).hexdigest()
+        """计算内容哈希，带文本规范化"""
+        if not content:
+            return None
+        # 规范化：去除多余空白、统一格式
+        normalized = ' '.join(str(content).split()).strip()
+        return hashlib.md5(normalized.encode('utf-8')).hexdigest()
 
     def get_news_filename(self, date=None):
         """获取指定日期的新闻文件名"""
@@ -112,11 +121,13 @@ class NewsFetcher:
             for _, row in stock_info_global_cls_df.iterrows():
                 total_count += 1
 
-                # 安全获取内容，确保为字符串
+                # 安全获取内容和标题，确保为字符串
                 content = str(row.get("内容", ""))
+                title = str(row.get("标题", ""))
 
-                # 计算内容哈希值
-                content_hash = self._calculate_hash(content)
+                # 组合标题和内容进行去重
+                combined = f"{title}||{content}"
+                content_hash = self._calculate_hash(combined)
 
                 # 检查是否已存在相同内容的新闻
                 if content_hash in self.news_hashes:
@@ -141,7 +152,7 @@ class NewsFetcher:
 
                 # 创建新闻项并添加哈希值
                 news_item = {
-                    "title": str(row.get("标题", "")),
+                    "title": title,
                     "content": content,
                     "date": pub_date,
                     "time": pub_time,
@@ -223,10 +234,11 @@ class NewsFetcher:
         duplicate_count = 0
 
         for item in news_data:
-            # 优先使用已有的哈希值，如果没有则计算内容哈希
+            # 优先使用已有的哈希值，如果没有则组合标题+内容计算哈希
             item_hash = item.get('hash')
             if not item_hash and 'content' in item:
-                item_hash = self._calculate_hash(item['content'])
+                combined = f"{item.get('title', '')}||{item['content']}"
+                item_hash = self._calculate_hash(combined)
 
             # 如果是新的哈希值，则添加到结果中
             if item_hash and item_hash not in unique_news:
@@ -266,7 +278,7 @@ def start_news_scheduler():
             try:
                 fetch_news_task()
                 # 等待10分钟
-                time.sleep(600)
+                time.sleep(1800)
             except Exception as e:
                 logger.error(f"定时任务执行出错: {str(e)}")
                 time.sleep(60)  # 出错后等待1分钟再试

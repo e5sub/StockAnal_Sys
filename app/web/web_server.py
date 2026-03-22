@@ -39,6 +39,7 @@ from app.analysis.etf_analyzer import EtfAnalyzer
 
 import sys
 import os
+import re
 
 # 将 tradingagents 目录添加到系统路径
 # 这允许应用从 tradingagents 代码库中导入模块
@@ -47,6 +48,25 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../t
 
 # 加载环境变量
 load_dotenv()
+
+
+def validate_stock_code(stock_code, market_type='A'):
+    """验证股票代码格式"""
+    if not stock_code or not isinstance(stock_code, str):
+        return False, "股票代码不能为空"
+    stock_code = stock_code.strip()
+    if len(stock_code) > 10:
+        return False, "股票代码长度无效"
+    patterns = {
+        'A': r'^[0-9]{6}$',
+        'HK': r'^[0-9]{4,5}$',
+        'US': r'^[A-Za-z]{1,5}$'
+    }
+    pattern = patterns.get(market_type, patterns['A'])
+    if not re.match(pattern, stock_code):
+        return False, f"股票代码格式无效: {stock_code}"
+    return True, stock_code
+
 
 # 检查是否需要初始化数据库
 if USE_DATABASE:
@@ -64,7 +84,8 @@ swaggerui_blueprint = get_swaggerui_blueprint(
 )
 
 app = Flask(__name__)
-CORS(app, resources={r"/*": {"origins": "*"}})
+allowed_origins = os.getenv('ALLOWED_ORIGINS', 'http://localhost:8888,http://127.0.0.1:8888').split(',')
+CORS(app, resources={r"/api/*": {"origins": allowed_origins, "methods": ["GET", "POST"], "allow_headers": ["Content-Type", "X-API-Key"]}})
 analyzer = StockAnalyzer()
 us_stock_service = USStockService()
 
@@ -82,7 +103,7 @@ if os.getenv('USE_REDIS_CACHE', 'False').lower() == 'true' and os.getenv('REDIS_
         'CACHE_DEFAULT_TIMEOUT': 300
     }
 
-cache = Cache(config={'CACHE_TYPE': 'SimpleCache'})
+cache = Cache(config=cache_config)
 cache.init_app(app)
 
 app.register_blueprint(swaggerui_blueprint, url_prefix=SWAGGER_URL)
@@ -708,6 +729,11 @@ def start_stock_analysis():
         if not stock_code:
             return jsonify({'error': '请输入股票代码'}), 400
 
+        valid, result = validate_stock_code(stock_code, market_type)
+        if not valid:
+            return jsonify({'error': result}), 400
+        stock_code = result
+
         app.logger.info(f"准备分析股票: {stock_code}")
 
         # 获取或创建任务
@@ -918,6 +944,11 @@ def enhanced_analysis():
         if not stock_code:
             return custom_jsonify({'error': '请输入股票代码'}), 400
 
+        valid, result = validate_stock_code(stock_code, market_type)
+        if not valid:
+            return jsonify({'error': result}), 400
+        stock_code = result
+
         # 调用新的任务系统，但模拟同步行为
         # 这会导致和之前一样的超时问题，但保持兼容
         timeout = 300
@@ -1013,6 +1044,11 @@ def get_stock_data():
 
         if not stock_code:
             return custom_jsonify({'error': '请提供股票代码'}), 400
+
+        valid, result = validate_stock_code(stock_code, market_type)
+        if not valid:
+            return jsonify({'error': result}), 400
+        stock_code = result
 
         # 根据period计算start_date
         end_date = datetime.now().strftime('%Y%m%d')
@@ -1426,6 +1462,11 @@ def api_fundamental_analysis():
         if not stock_code:
             return jsonify({'error': '请提供股票代码'}), 400
 
+        valid, result = validate_stock_code(stock_code)
+        if not valid:
+            return jsonify({'error': result}), 400
+        stock_code = result
+
         # 获取基本面分析结果
         result = fundamental_analyzer.calculate_fundamental_score(stock_code)
 
@@ -1516,6 +1557,12 @@ def api_capital_flow():
         if not stock_code:
             return jsonify({'error': 'Stock code is required'}), 400
 
+        if market_type:
+            valid, result = validate_stock_code(stock_code, market_type)
+            if not valid:
+                return jsonify({'error': result}), 400
+            stock_code = result
+
         # Calculate capital flow score
         result = capital_flow_analyzer.calculate_capital_flow_score(stock_code, market_type)
 
@@ -1536,6 +1583,11 @@ def api_scenario_predict():
 
         if not stock_code:
             return jsonify({'error': '请提供股票代码'}), 400
+
+        valid, result = validate_stock_code(stock_code, market_type)
+        if not valid:
+            return jsonify({'error': result}), 400
+        stock_code = result
 
         # 获取情景预测结果
         result = scenario_predictor.generate_scenarios(stock_code, market_type, days)
@@ -1558,6 +1610,11 @@ def api_qa():
         if not stock_code or not question:
             return jsonify({'error': '请提供股票代码和问题'}), 400
 
+        valid, result = validate_stock_code(stock_code, market_type)
+        if not valid:
+            return jsonify({'error': result}), 400
+        stock_code = result
+
         # 获取智能问答结果
         result = stock_qa.answer_question(stock_code, question, market_type)
 
@@ -1577,6 +1634,11 @@ def api_risk_analysis():
 
         if not stock_code:
             return jsonify({'error': '请提供股票代码'}), 400
+
+        valid, result = validate_stock_code(stock_code, market_type)
+        if not valid:
+            return jsonify({'error': result}), 400
+        stock_code = result
 
         # 获取风险分析结果
         result = risk_monitor.analyze_stock_risk(stock_code, market_type)
@@ -1611,7 +1673,7 @@ def api_portfolio_risk():
 def api_index_analysis():
     try:
         index_code = request.args.get('index_code')
-        limit = int(request.args.get('limit', 30))
+        limit = min(max(int(request.args.get('limit', 30)), 1), 500)
 
         if not index_code:
             return jsonify({'error': '请提供指数代码'}), 400
@@ -1630,7 +1692,7 @@ def api_index_analysis():
 def api_industry_analysis():
     try:
         industry = request.args.get('industry')
-        limit = int(request.args.get('limit', 30))
+        limit = min(max(int(request.args.get('limit', 30)), 1), 500)
 
         if not industry:
             return jsonify({'error': '请提供行业名称'}), 400
@@ -1683,7 +1745,7 @@ def api_industry_detail():
 @app.route('/api/industry_compare', methods=['GET'])
 def api_industry_compare():
     try:
-        limit = int(request.args.get('limit', 10))
+        limit = min(max(int(request.args.get('limit', 10)), 1), 500)
 
         # 获取行业比较结果
         result = index_industry_analyzer.compare_industries(limit)
@@ -1735,7 +1797,7 @@ def get_history_analysis():
         return jsonify({'error': '数据库功能未启用'}), 400
 
     stock_code = request.args.get('stock_code')
-    limit = int(request.args.get('limit', 10))
+    limit = min(max(int(request.args.get('limit', 10)), 1), 500)
 
     if not stock_code:
         return jsonify({'error': '请提供股票代码'}), 400
@@ -1768,7 +1830,7 @@ def get_history_analysis():
 def get_latest_news():
     try:
         days = int(request.args.get('days', 1))  # 默认获取1天的新闻
-        limit = int(request.args.get('limit', 1000))  # 默认最多获取1000条
+        limit = min(max(int(request.args.get('limit', 1000)), 1), 500)  # 限制范围1-500
         only_important = request.args.get('important', '0') == '1'  # 是否只看重要新闻
         news_type = request.args.get('type', 'all')  # 新闻类型，可选值: all, hotspot
 

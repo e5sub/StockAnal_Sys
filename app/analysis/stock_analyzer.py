@@ -21,6 +21,7 @@ import json
 import threading
 from urllib.parse import urlparse
 from openai import OpenAI
+from app.core.ai_client import get_ai_client, get_ai_model, chat_completion, get_completion_content
 
 # 线程局部存储
 thread_local = threading.local()
@@ -39,16 +40,12 @@ class StockAnalyzer:
         load_dotenv()
 
         # 设置 OpenAI API (原 Gemini API)
-        self.openai_api_key = os.getenv('OPENAI_API_KEY', os.getenv('OPENAI_API_KEY'))
-        self.openai_api_url = os.getenv('OPENAI_API_URL', 'https://api.openai.com/v1')
-        self.openai_model = os.getenv('OPENAI_API_MODEL', 'gemini-2.0-pro-exp-02-05')
-        self.function_call_model = os.getenv('FUNCTION_CALL_MODEL','gpt-4o')
+        self.openai_api_key = os.getenv('OPENAI_API_KEY')
+        self.openai_model = get_ai_model()
+        self.function_call_model = os.getenv('FUNCTION_CALL_MODEL', 'gpt-4o')
         self.news_model = os.getenv('NEWS_MODEL')
 
-        self.client = OpenAI(
-            api_key=self.openai_api_key,
-            base_url=self.openai_api_url
-        )
+        self.client = get_ai_client()
 
         # 配置参数
         self.params = {
@@ -894,40 +891,18 @@ class StockAnalyzer:
         接收一个已经构建好的prompt，并返回AI模型的分析结果。
         """
         try:
-            import queue
-            import threading
-
             messages = [{"role": "user", "content": prompt}]
-            result_queue = queue.Queue()
+            response, err = chat_completion(
+                self.client, messages, temperature=0.8, max_tokens=4000
+            )
+            if err:
+                self.logger.error(f"AI调用失败: {err}")
+                return err
 
-            def call_api():
-                try:
-                    response = self.client.chat.completions.create(
-                        model=self.openai_model,
-                        messages=messages,
-                        temperature=0.8,
-                        max_tokens=4000,
-                        stream=False,
-                        timeout=300
-                    )
-                    result_queue.put(response)
-                except Exception as e:
-                    result_queue.put(e)
-
-            api_thread = threading.Thread(target=call_api)
-            api_thread.daemon = True
-            api_thread.start()
-
-            try:
-                result = result_queue.get(timeout=240)
-                if isinstance(result, Exception):
-                    raise result
-                assistant_reply = result.choices[0].message.content.strip()
-                return assistant_reply
-            except queue.Empty:
-                return "AI分析超时，无法获取分析结果。请稍后再试。"
-            except Exception as e:
-                return f"AI分析过程中发生错误: {str(e)}"
+            content = get_completion_content(response)
+            if content:
+                return content.strip()
+            return "AI分析超时，无法获取分析结果。请稍后再试。"
 
         except Exception as e:
             self.logger.error(f"从prompt进行AI分析时出错: {str(e)}")

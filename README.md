@@ -1,7 +1,7 @@
 # 智能分析系统
 
 ![版本](https://img.shields.io/badge/版本-2.1.2-blue.svg)
-![Python](https://img.shields.io/badge/Python-3.7+-green.svg)
+![Python](https://img.shields.io/badge/Python-3.9+-green.svg)
 ![Flask](https://img.shields.io/badge/Flask-2.0+-red.svg)
 ![AKShare](https://img.shields.io/badge/AKShare-1.0.0+-orange.svg)
 ![AI](https://img.shields.io/badge/AI_API-集成-blueviolet.svg)
@@ -110,7 +110,7 @@
 
 ### 环境要求
 
-- Python 3.7+
+- Python 3.9+
 - pip包管理器
 - 网络连接（用于获取股票数据和访问AI API）
 

@@ -2,11 +2,20 @@
 """
 baostock数据源适配器 - 老王说：akshare全挂了就靠你了！
 注意：baostock数据是T+1的，没有实时数据
+Input: 股票代码、日期范围等查询参数
+Output: DataFrame或Dict格式的股票/财务数据
+Pos: app/adapters层，作为备用数据源适配器被fallback_manager调度
+一旦我被修改，请更新我的头部注释，以及所属文件夹的md。
 """
 import baostock as bs
 import pandas as pd
+import logging
+import threading
+from datetime import datetime
 from typing import List, Dict
 from .base_adapter import BaseAdapter
+
+logger = logging.getLogger(__name__)
 
 
 class BaostockAdapter(BaseAdapter):
@@ -14,18 +23,20 @@ class BaostockAdapter(BaseAdapter):
 
     def __init__(self):
         self._logged_in = False
+        self._login_lock = threading.Lock()
 
     @property
     def name(self) -> str:
         return "baostock"
 
     def _ensure_login(self):
-        """确保已登录"""
-        if not self._logged_in:
-            lg = bs.login()
-            if lg.error_code != '0':
-                raise Exception(f"baostock登录失败: {lg.error_msg}")
-            self._logged_in = True
+        """确保已登录（线程安全）"""
+        with self._login_lock:
+            if not self._logged_in:
+                lg = bs.login()
+                if lg.error_code != '0':
+                    raise Exception(f"baostock登录失败: {lg.error_msg}")
+                self._logged_in = True
 
     def _convert_code(self, code: str) -> str:
         """转换股票代码格式：000001 -> sh.000001 或 sz.000001"""
@@ -108,27 +119,38 @@ class BaostockAdapter(BaseAdapter):
             return dict(zip(rs.fields, rs.get_row_data()))
         return {}
 
+    def _get_latest_quarter(self):
+        """获取最近一个已结束的季度（动态计算）"""
+        now = datetime.now()
+        year = now.year
+        quarter = (now.month - 1) // 3  # 上一季度（0表示去年Q4）
+        if quarter == 0:
+            year -= 1
+            quarter = 4
+        return year, quarter
+
     def get_financial_data(self, code: str) -> Dict:
         """获取财务数据"""
         self._ensure_login()
         bs_code = self._convert_code(code)
         result = {}
+        year, quarter = self._get_latest_quarter()
 
         # 盈利能力
         try:
-            rs = bs.query_profit_data(code=bs_code, year=2024, quarter=3)
+            rs = bs.query_profit_data(code=bs_code, year=year, quarter=quarter)
             if rs.error_code == '0' and rs.next():
                 result['profit'] = dict(zip(rs.fields, rs.get_row_data()))
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"baostock盈利数据失败(code={code}, {year}Q{quarter}): {type(e).__name__}: {e}")
 
         # 成长能力
         try:
-            rs = bs.query_growth_data(code=bs_code, year=2024, quarter=3)
+            rs = bs.query_growth_data(code=bs_code, year=year, quarter=quarter)
             if rs.error_code == '0' and rs.next():
                 result['growth'] = dict(zip(rs.fields, rs.get_row_data()))
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"baostock成长数据失败(code={code}, {year}Q{quarter}): {type(e).__name__}: {e}")
 
         return result
 
@@ -138,12 +160,13 @@ class BaostockAdapter(BaseAdapter):
             self._ensure_login()
             rs = bs.query_trade_dates(start_date="2024-01-01", end_date="2024-01-02")
             return rs.error_code == '0'
-        except Exception:
+        except Exception as e:
+            logger.warning(f"baostock健康检查失败: {type(e).__name__}: {e}")
             return False
 
     def __del__(self):
         if self._logged_in:
             try:
                 bs.logout()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"baostock登出异常: {type(e).__name__}: {e}")

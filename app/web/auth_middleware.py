@@ -4,10 +4,26 @@ import os
 import time
 import hashlib
 import hmac
+import secrets
+import logging
+
+logger = logging.getLogger(__name__)
+
+# 缓存运行时生成的临时密钥，避免每次调用都重新生成
+_runtime_api_key = None
+_runtime_hmac_secret = None
 
 
 def get_api_key():
-    return os.getenv('API_KEY', 'UZXJfw3YNX80DLfN')
+    global _runtime_api_key
+    key = os.getenv('API_KEY')
+    if key:
+        return key
+    # 环境变量未设置，生成随机临时密钥并记录警告
+    if _runtime_api_key is None:
+        _runtime_api_key = secrets.token_urlsafe(32)
+        logger.warning("环境变量 API_KEY 未设置，已生成随机临时密钥。请在生产环境中配置 API_KEY。")
+    return _runtime_api_key
 
 
 def require_api_key(f):
@@ -26,8 +42,15 @@ def require_api_key(f):
 
 
 def generate_hmac_signature(data, secret_key=None):
+    global _runtime_hmac_secret
     if secret_key is None:
-        secret_key = os.getenv('HMAC_SECRET', 'default_hmac_secret_for_development')
+        secret_key = os.getenv('HMAC_SECRET')
+        if not secret_key:
+            # 环境变量未设置，生成随机临时密钥并记录警告
+            if _runtime_hmac_secret is None:
+                _runtime_hmac_secret = secrets.token_urlsafe(32)
+                logger.warning("环境变量 HMAC_SECRET 未设置，已生成随机临时密钥。请在生产环境中配置 HMAC_SECRET。")
+            secret_key = _runtime_hmac_secret
 
     if isinstance(data, dict):
         # 对字典进行排序，确保相同的数据产生相同的签名

@@ -2,8 +2,13 @@
 """
 统一数据提供层 - 老王说：调数据就找我，别管底下用的啥！
 单例模式，全局共享
+Input: 股票代码、日期范围等业务查询参数
+Output: DataFrame或Dict格式的统一数据结果
+Pos: app/core层，业务代码唯一入口，封装故障转移与限流
+一旦我被修改，请更新我的头部注释，以及所属文件夹的md。
 """
 import logging
+import time
 from typing import List, Dict, Optional
 import pandas as pd
 
@@ -29,7 +34,16 @@ class DataProvider:
         if self._initialized:
             return
         self._init_adapters()
+        self._last_request_time = 0
+        self._min_interval = 0.2  # 最小200ms间隔
         self._initialized = True
+
+    def _rate_limit(self):
+        """简单的请求限流"""
+        elapsed = time.time() - self._last_request_time
+        if elapsed < self._min_interval:
+            time.sleep(self._min_interval - elapsed)
+        self._last_request_time = time.time()
 
     def _init_adapters(self):
         """初始化适配器"""
@@ -47,48 +61,59 @@ class DataProvider:
     def get_stock_history(self, code: str, start_date: str, end_date: str,
                           adjust: str = "qfq") -> pd.DataFrame:
         """获取股票历史K线"""
+        self._rate_limit()
         return self.fallback.execute('get_stock_history', code, start_date, end_date, adjust)
 
     def get_index_stocks(self, index_code: str) -> List[str]:
         """获取指数成分股"""
+        self._rate_limit()
         return self.fallback.execute('get_index_stocks', index_code)
 
     def get_stock_info(self, code: str) -> Dict:
         """获取股票基本信息"""
+        self._rate_limit()
         return self.fallback.execute('get_stock_info', code)
 
     def get_financial_data(self, code: str) -> Dict:
         """获取财务数据"""
+        self._rate_limit()
         return self.fallback.execute('get_financial_data', code)
 
     # ========== akshare专有方法（无baostock备用）==========
 
     def get_board_stocks(self, board: str) -> List[str]:
         """获取板块股票列表（仅akshare支持）"""
+        self._rate_limit()
         return self.akshare.get_board_stocks(board)
 
     def get_industry_list(self) -> pd.DataFrame:
         """获取行业板块列表（仅akshare支持）"""
+        self._rate_limit()
         return self.akshare.get_industry_list()
 
     def get_industry_stocks(self, industry: str) -> List[str]:
         """获取行业成分股（仅akshare支持）"""
+        self._rate_limit()
         return self.akshare.get_industry_stocks(industry)
 
     def get_concept_stocks(self, concept: str) -> List[str]:
         """获取概念板块成分股代码列表"""
+        self._rate_limit()
         return self.akshare.get_concept_stocks(concept)
 
     def get_concept_stocks_detail(self, concept: str) -> List[Dict]:
         """获取概念板块成分股详细信息（含名称、价格等）"""
+        self._rate_limit()
         return self.akshare.get_concept_stocks_detail(concept)
 
     def get_capital_flow(self, code: str) -> Dict:
         """获取资金流向（仅akshare支持）"""
+        self._rate_limit()
         return self.akshare.get_capital_flow(code)
 
     def get_north_flow(self) -> pd.DataFrame:
         """获取北向资金（仅akshare支持）"""
+        self._rate_limit()
         return self.akshare.get_north_flow()
 
     # ========== 状态管理 ==========

@@ -326,7 +326,7 @@ function displayHotspots(hotspots) {
         hotspotsHtml += `
             <div class="hotspot-item">
                 <span class="hotspot-rank ${rankClass}">${index + 1}</span>
-                <span class="hotspot-title">${item.title || item.content}</span>
+                <span class="hotspot-title">${escapeHtml(item.title || item.content)}</span>
             </div>
         `;
     });
@@ -410,7 +410,7 @@ function displayNewsTimeline(newsList) {
             
             timelineHtml += `
                 <div class="news-item">
-                    <div class="news-content ${contentClass}">${news.content || ''}</div>
+                    <div class="news-content ${contentClass}">${escapeHtml(news.content)}</div>
                 </div>
             `;
         });
@@ -620,7 +620,7 @@ function displayTickerNews(newsList) {
     let tickerItems = '';
 
     newsList.forEach(news => {
-        tickerItems += `<div class="ticker-item">${news.content || ''}</div>`;
+        tickerItems += `<div class="ticker-item">${escapeHtml(news.content)}</div>`;
     });
 
     $('#ticker-container .ticker-wrapper').html(tickerItems);

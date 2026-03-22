@@ -14,6 +14,7 @@ import openai
 from openai import OpenAI
 import logging
 from logging.handlers import RotatingFileHandler
+from app.core.ai_client import get_ai_client, get_ai_model, chat_completion
 """
 
 """
@@ -25,13 +26,9 @@ logging.basicConfig(level=logging.INFO,
 class ScenarioPredictor:
     def __init__(self, analyzer, openai_api_key=None, openai_model=None):
         self.analyzer = analyzer
-        self.openai_api_key = os.getenv('OPENAI_API_KEY', os.getenv('OPENAI_API_KEY'))
-        self.openai_api_url = os.getenv('OPENAI_API_URL', 'https://api.openai.com/v1')
-        self.openai_model = os.getenv('OPENAI_API_MODEL', 'gemini-2.0-pro-exp-02-05')
-        self.client = OpenAI(
-            api_key=self.openai_api_key,
-            base_url=self.openai_api_url
-        )
+        self.openai_api_key = os.getenv('OPENAI_API_KEY')
+        self.client = get_ai_client()
+        self.openai_model = get_ai_model()
         # logging.info(f"scenario_predictor初始化完成：「{self.openai_api_key} {self.openai_api_url} {self.openai_model}」")
 
     def generate_scenarios(self, stock_code, market_type='A', days=60):
@@ -181,15 +178,14 @@ class ScenarioPredictor:
     """
     
             # 调用AI API
-            response = self.client.chat.completions.create(
-                model=self.openai_model,
-                messages=[
-                    {"role": "system", "content": "你是专业的股票分析师。请直接返回JSON格式，不要使用代码块。"},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.7,
-                max_tokens=4096
-            )
+            messages = [
+                {"role": "system", "content": "你是专业的股票分析师。请直接返回JSON格式，不要使用代码块。"},
+                {"role": "user", "content": prompt}
+            ]
+            response, err = chat_completion(self.client, messages, temperature=0.7, max_tokens=4096)
+            if err:
+                logging.error(f"AI调用失败: {err}")
+                return self._get_default_analysis()
     
             # 解析AI回复
             import json
@@ -215,7 +211,7 @@ class ScenarioPredictor:
                 logging.error(f"JSON解析失败: {e}, 内容: {content[:200]}")
                 return self._get_default_analysis()
         except Exception as e:
-            print(f"生成AI分析出错: {str(e)}")
+            logging.error(f"生成AI分析出错: {str(e)}")
             return self._get_default_analysis()
     
     def _get_default_risk_factors(self):

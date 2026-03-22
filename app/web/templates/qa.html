@@ -591,7 +591,9 @@
         parts.forEach(part => {
             if (part.startsWith('```mermaid')) {
                 const code = part.replace(/```mermaid\n|```/g, '').trim();
-                html += `<div class="mermaid">${code}</div>`;
+                // 验证mermaid代码只包含安全字符
+                var safeMermaid = code.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '');
+                html += `<div class="mermaid">${safeMermaid}</div>`;
             } else {
                  let formattedPart = part
                     .replace(/&/g, '&amp;')

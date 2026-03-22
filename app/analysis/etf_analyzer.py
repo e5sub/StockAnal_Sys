@@ -4,6 +4,9 @@ import pandas as pd
 from datetime import datetime, timedelta
 import numpy as np
 from stockstats import StockDataFrame
+import logging
+
+logger = logging.getLogger(__name__)
 
 class EtfAnalyzer:
     def __init__(self, etf_code, stock_analyzer_instance):
@@ -11,22 +14,45 @@ class EtfAnalyzer:
         self.analysis_result = {}
         self.hist_df = None # 用于存储历史数据以供后续分析使用
         self.stock_analyzer = stock_analyzer_instance # 复用StockAnalyzer实例
+        self._cache = {}
+        self._cache_ttl = 1800  # 30分钟缓存
         # 初始化统一数据层
         from app.core.data_provider import get_data_provider
         self.data_provider = get_data_provider()
 
+    def _get_cached(self, key):
+        """获取缓存数据"""
+        if key in self._cache:
+            cache_time, data = self._cache[key]
+            if (datetime.now() - cache_time).total_seconds() < self._cache_ttl:
+                return data
+        return None
+
+    def _set_cached(self, key, data):
+        """设置缓存"""
+        self._cache[key] = (datetime.now(), data)
+
     def run_analysis(self):
         """
-        运行所有分析步骤并返回结果
+        运行所有分析步骤并返回结果，单个步骤失败不中断整体分析
         """
-        self.get_basic_info()
-        self.analyze_market_performance()
-        self.analyze_fund_flow()
-        self.analyze_risk_and_tracking()
-        self.analyze_holdings()
-        self.analyze_sector()
-        self.get_ai_summary()
-        
+        steps = [
+            ('basic_info', self.get_basic_info),
+            ('market_performance', self.analyze_market_performance),
+            ('fund_flow', self.analyze_fund_flow),
+            ('risk_and_tracking', self.analyze_risk_and_tracking),
+            ('holdings', self.analyze_holdings),
+            ('sector_analysis', self.analyze_sector),
+            ('ai_summary', self.get_ai_summary),
+        ]
+        for key, step_func in steps:
+            try:
+                step_func()
+            except Exception as e:
+                logger.error(f"分析步骤 {key} 执行失败: {e}")
+                if key not in self.analysis_result:
+                    self.analysis_result[key] = {"error": f"分析步骤执行失败: {e}"}
+
         return self.analysis_result
 
     def get_basic_info(self):
@@ -35,9 +61,20 @@ class EtfAnalyzer:
         """
         print("开始获取基本信息...")
         try:
-            # 使用akshare获取ETF基金概况
-            fund_info_df = ak.fund_etf_fund_info_em(fund=self.etf_code)
-            
+            # 使用akshare获取ETF基金概况（带缓存）
+            cache_key = f"fund_info_{self.etf_code}"
+            fund_info_df = self._get_cached(cache_key)
+            if fund_info_df is None:
+                try:
+                    fund_info_df = ak.fund_etf_fund_info_em(fund=self.etf_code)
+                    if fund_info_df is not None and not fund_info_df.empty:
+                        self._set_cached(cache_key, fund_info_df)
+                    else:
+                        fund_info_df = pd.DataFrame()
+                except Exception as e:
+                    logger.warning(f"获取ETF基金概况失败: {e}")
+                    fund_info_df = pd.DataFrame()
+
             if fund_info_df.empty:
                 info_dict = {"error": "未能获取到该ETF的基本信息，请检查代码是否正确。"}
             else:
@@ -67,8 +104,19 @@ class EtfAnalyzer:
             end_date_str = end_date.strftime('%Y%m%d')
             start_date_str = start_date.strftime('%Y%m%d')
 
-            # 使用后复权数据
-            hist_df = ak.fund_etf_hist_em(symbol=self.etf_code, start_date=start_date_str, end_date=end_date_str, adjust="hfq")
+            # 使用后复权数据（带缓存）
+            cache_key = f"etf_hist_{self.etf_code}_{start_date_str}_{end_date_str}"
+            hist_df = self._get_cached(cache_key)
+            if hist_df is None:
+                try:
+                    hist_df = ak.fund_etf_hist_em(symbol=self.etf_code, start_date=start_date_str, end_date=end_date_str, adjust="hfq")
+                    if hist_df is not None and not hist_df.empty:
+                        self._set_cached(cache_key, hist_df)
+                    else:
+                        hist_df = pd.DataFrame()
+                except Exception as e:
+                    logger.warning(f"获取ETF历史行情失败: {e}")
+                    hist_df = pd.DataFrame()
 
             if hist_df.empty:
                 self.analysis_result['market_performance'] = {"error": "未能获取到该ETF的历史行情数据。"}
@@ -166,8 +214,28 @@ class EtfAnalyzer:
             # --- 与基准对比 ---
             benchmark_code = 'sh000300' # 默认使用沪深300作为基准
             print(f"开始与基准 {benchmark_code} 进行对比...")
-            
-            benchmark_df = ak.stock_zh_index_daily(symbol=benchmark_code)
+
+            cache_key_bm = f"benchmark_{benchmark_code}"
+            benchmark_df = self._get_cached(cache_key_bm)
+            if benchmark_df is None:
+                try:
+                    benchmark_df = ak.stock_zh_index_daily(symbol=benchmark_code)
+                    if benchmark_df is not None and not benchmark_df.empty:
+                        self._set_cached(cache_key_bm, benchmark_df)
+                    else:
+                        benchmark_df = pd.DataFrame()
+                except Exception as e:
+                    logger.warning(f"获取基准指数数据失败: {e}")
+                    benchmark_df = pd.DataFrame()
+
+            if benchmark_df.empty:
+                self.analysis_result['market_performance']['benchmark_returns'] = {}
+                self.analysis_result['market_performance']['alpha'] = {}
+                self.analysis_result['market_performance']['message'] = "市场表现分析完成，但基准数据获取失败。"
+                print("基准数据获取失败，跳过对比分析。")
+                return
+
+            benchmark_df = benchmark_df.copy()
             benchmark_df['date'] = pd.to_datetime(benchmark_df['date'])
             benchmark_df.set_index('date', inplace=True)
             
@@ -292,7 +360,31 @@ class EtfAnalyzer:
 
             # 2. 与基准比较 (Beta, 跟踪误差, 夏普比率)
             benchmark_code = 'sh000300'
-            benchmark_df = ak.stock_zh_index_daily(symbol=benchmark_code)
+            cache_key_bm = f"benchmark_{benchmark_code}"
+            benchmark_df = self._get_cached(cache_key_bm)
+            if benchmark_df is None:
+                try:
+                    benchmark_df = ak.stock_zh_index_daily(symbol=benchmark_code)
+                    if benchmark_df is not None and not benchmark_df.empty:
+                        self._set_cached(cache_key_bm, benchmark_df)
+                    else:
+                        benchmark_df = pd.DataFrame()
+                except Exception as e:
+                    logger.warning(f"获取基准指数数据失败: {e}")
+                    benchmark_df = pd.DataFrame()
+
+            if benchmark_df.empty:
+                self.analysis_result['risk_and_tracking'] = {
+                    "annualized_volatility": annualized_volatility,
+                    "beta": None,
+                    "tracking_error": None,
+                    "sharpe_ratio": None,
+                    "avg_premium_discount_monthly": None
+                }
+                print("基准数据获取失败，仅计算波动率。")
+                return
+
+            benchmark_df = benchmark_df.copy()
             benchmark_df['date'] = pd.to_datetime(benchmark_df['date'])
             benchmark_df.set_index('date', inplace=True)
             benchmark_df = benchmark_df.loc[df.index.min():df.index.max()]
@@ -349,9 +441,20 @@ class EtfAnalyzer:
         """
         print("开始分析持仓...")
         try:
-            # 获取ETF持仓明细
-            holdings_df = ak.fund_portfolio_hold_em(symbol=self.etf_code, date=datetime.now().strftime("%Y"))
-            
+            # 获取ETF持仓明细（带缓存）
+            cache_key = f"holdings_{self.etf_code}_{datetime.now().strftime('%Y')}"
+            holdings_df = self._get_cached(cache_key)
+            if holdings_df is None:
+                try:
+                    holdings_df = ak.fund_portfolio_hold_em(symbol=self.etf_code, date=datetime.now().strftime("%Y"))
+                    if holdings_df is not None and not holdings_df.empty:
+                        self._set_cached(cache_key, holdings_df)
+                    else:
+                        holdings_df = pd.DataFrame()
+                except Exception as e:
+                    logger.warning(f"获取ETF持仓数据失败: {e}")
+                    holdings_df = pd.DataFrame()
+
             if holdings_df.empty or '股票代码' not in holdings_df.columns:
                  self.analysis_result['holdings'] = {"error": "未能获取到该ETF的持仓数据。"}
                  print("未能获取持仓数据。")
@@ -397,15 +500,21 @@ class EtfAnalyzer:
             # 这是一个复杂的映射，这里我们先做一个简化假设，后续可以优化
             sector_name = tracking_index.replace('指数', '').replace('中证', '').replace('国证', '')
             
-            # 尝试获取行业板块数据，如果失败，则可能是概念板块
-            try:
-                sector_df = ak.stock_board_industry_hist_em(symbol=sector_name)
-            except Exception:
+            # 尝试获取行业板块数据（带缓存），如果失败，则可能是概念板块
+            cache_key_sector = f"sector_hist_{sector_name}"
+            sector_df = self._get_cached(cache_key_sector)
+            if sector_df is None:
                 try:
-                    sector_df = ak.stock_board_concept_hist_em(symbol=sector_name)
-                except Exception as e:
-                    self.analysis_result['sector_analysis'] = {"error": f"无法获取板块 '{sector_name}' 的行情数据: {e}"}
-                    return
+                    sector_df = ak.stock_board_industry_hist_em(symbol=sector_name)
+                except Exception:
+                    try:
+                        sector_df = ak.stock_board_concept_hist_em(symbol=sector_name)
+                    except Exception as e:
+                        logger.warning(f"无法获取板块 '{sector_name}' 的行情数据: {e}")
+                        self.analysis_result['sector_analysis'] = {"error": f"无法获取板块 '{sector_name}' 的行情数据: {e}"}
+                        return
+                if sector_df is not None and not sector_df.empty:
+                    self._set_cached(cache_key_sector, sector_df)
 
             sector_df['日期'] = pd.to_datetime(sector_df['日期'])
             sector_df.set_index('日期', inplace=True)
@@ -419,10 +528,28 @@ class EtfAnalyzer:
                     old_price = sector_df['收盘'].iloc[-days-1]
                     sector_returns[name] = ((latest_price / old_price) - 1) * 100 if old_price != 0 else 0
             
-            # 3. 板块估值 (PE百分位)
-            pe_df = ak.stock_board_industry_pe_em(symbol=sector_name)
-            latest_pe = pe_df.iloc[-1]['滚动市盈率']
-            pe_percentile = (pe_df['滚动市盈率'] < latest_pe).mean() * 100 if not pe_df.empty else None
+            # 3. 板块估值 (PE百分位)（带缓存和容错）
+            cache_key_pe = f"sector_pe_{sector_name}"
+            pe_df = self._get_cached(cache_key_pe)
+            if pe_df is None:
+                try:
+                    pe_df = ak.stock_board_industry_pe_em(symbol=sector_name)
+                    if pe_df is not None and not pe_df.empty:
+                        self._set_cached(cache_key_pe, pe_df)
+                    else:
+                        pe_df = pd.DataFrame()
+                except Exception as e:
+                    logger.warning(f"获取板块PE数据失败: {e}")
+                    pe_df = pd.DataFrame()
+
+            latest_pe = None
+            pe_percentile = None
+            if not pe_df.empty and '滚动市盈率' in pe_df.columns:
+                try:
+                    latest_pe = pe_df.iloc[-1]['滚动市盈率']
+                    pe_percentile = (pe_df['滚动市盈率'] < latest_pe).mean() * 100
+                except Exception as e:
+                    logger.warning(f"计算PE百分位失败: {e}")
 
             sector_data = {
                 "sector_name": sector_name,

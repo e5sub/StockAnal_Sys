@@ -716,7 +716,7 @@
         let industry = "行业数据加载中...";
     
         // 设置页面中的股票代码和默认值
-        $('#stock-title').html(`${stockName} <span class="text-muted">${stockCode}</span>`);
+        $('#stock-title').html(`${escapeHtml(stockName)} <span class="text-muted">${escapeHtml(stockCode)}</span>`);
         $('#stock-info').text(`${industry} | 数据日期: ${new Date(latestData.date).toLocaleDateString()}`);
     
         
@@ -1570,7 +1570,7 @@
             const stockName = result.basic_info.stock_name || $('#stock-title').text().split(' ')[0];
             const industry = result.basic_info.industry || $('#stock-info').text().split(' | ')[0];
             
-            $('#stock-title').html(`${stockName} <span class="text-muted">${stockCode}</span>`);
+            $('#stock-title').html(`${escapeHtml(stockName)} <span class="text-muted">${escapeHtml(stockCode)}</span>`);
             $('#stock-info').text(`${industry} | 数据日期: ${$('#stock-info').text().split(' | ')[1]}`);
             $('#ai-analysis-stock-name').text(stockName);
         }

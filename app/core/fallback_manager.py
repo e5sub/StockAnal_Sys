@@ -1,9 +1,14 @@
 # -*- coding: utf-8 -*-
 """
 故障转移管理器 - 老王说：接口挂了？自动给你换一个！
+Input: 适配器列表、方法名及参数
+Output: 第一个成功适配器的返回结果
+Pos: app/core层，调度多数据源适配器实现故障转移
+一旦我被修改，请更新我的头部注释，以及所属文件夹的md。
 """
 import time
 import logging
+import threading
 from typing import List, Any, Optional
 import pandas as pd
 
@@ -23,6 +28,7 @@ class FallbackManager:
         self.adapters = adapters
         self.max_retries = max_retries
         self.retry_delay = retry_delay
+        self._lock = threading.Lock()
         # 适配器健康状态
         self._adapter_status = {a.name: True for a in adapters}
         # 失败计数
@@ -48,8 +54,9 @@ class FallbackManager:
             adapter_name = adapter.name
 
             # 跳过已标记为不可用的适配器（但失败次数超过阈值才跳过）
-            if self._fail_count.get(adapter_name, 0) >= 5:
-                continue
+            with self._lock:
+                if self._fail_count.get(adapter_name, 0) >= 5:
+                    continue
 
             # 检查适配器是否有该方法
             if not hasattr(adapter, method_name):
@@ -65,8 +72,9 @@ class FallbackManager:
                     # 检查结果是否有效
                     if self._is_valid_result(result):
                         # 成功，重置失败计数
-                        self._fail_count[adapter_name] = 0
-                        self._adapter_status[adapter_name] = True
+                        with self._lock:
+                            self._fail_count[adapter_name] = 0
+                            self._adapter_status[adapter_name] = True
                         return result
 
                 except Exception as e:
@@ -77,8 +85,10 @@ class FallbackManager:
                         time.sleep(self.retry_delay)
 
             # 该适配器所有重试都失败了
-            self._fail_count[adapter_name] = self._fail_count.get(adapter_name, 0) + 1
-            logger.warning(f"[{adapter_name}] 失败次数: {self._fail_count[adapter_name]}")
+            with self._lock:
+                self._fail_count[adapter_name] = self._fail_count.get(adapter_name, 0) + 1
+                fail_count = self._fail_count[adapter_name]
+            logger.warning(f"[{adapter_name}] 失败次数: {fail_count}")
 
         # 所有适配器都失败了
         error_msg = f"所有数据源均不可用 (尝试了: {tried_adapters})"
@@ -90,21 +100,30 @@ class FallbackManager:
         """检查结果是否有效"""
         if result is None:
             return False
-        if isinstance(result, pd.DataFrame) and result.empty:
-            return False
+        if isinstance(result, pd.DataFrame):
+            if result.empty:
+                return False
+            # 检查K线数据必需列
+            required_cols = {'date', 'open', 'high', 'low', 'close', 'volume'}
+            if required_cols.issubset(set(result.columns)):
+                return True
+            # 如果不是K线数据但非空，也视为有效
+            return len(result.columns) > 0
         if isinstance(result, (list, dict)) and len(result) == 0:
             return False
         return True
 
     def reset_status(self):
         """重置所有适配器状态"""
-        for adapter in self.adapters:
-            self._adapter_status[adapter.name] = True
-            self._fail_count[adapter.name] = 0
+        with self._lock:
+            for adapter in self.adapters:
+                self._adapter_status[adapter.name] = True
+                self._fail_count[adapter.name] = 0
 
     def get_status(self) -> dict:
         """获取适配器状态"""
-        return {
-            'status': self._adapter_status.copy(),
-            'fail_count': self._fail_count.copy()
-        }
+        with self._lock:
+            return {
+                'status': self._adapter_status.copy(),
+                'fail_count': self._fail_count.copy()
+            }
