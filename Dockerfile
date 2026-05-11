@@ -22,9 +22,6 @@ RUN echo 'deb http://mirrors.aliyun.com/debian/ bookworm main' > /etc/apt/source
 # 更新 pip，并安装 setuptools 和 wheel
 RUN python -m pip install --upgrade pip setuptools wheel
 
-# 安装 Gunicorn
-RUN pip install gunicorn
-
 # 安装系统依赖
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
