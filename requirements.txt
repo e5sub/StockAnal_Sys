@@ -14,7 +14,7 @@ seaborn==0.13.2
 ipython>=7.34.0
 beautifulsoup4==4.12.3
 html5lib==1.1
-lxml==4.9.4
+lxml
 jsonpath==0.82.2
 openpyxl==3.1.5
 flask_swagger_ui>=4.11.1
@@ -27,7 +27,7 @@ scikit-learn==1.2.2
 statsmodels==0.14.5
 pytest==7.3.1
 tavily-python
-duckduckgo-search>=6.0.2
+duckduckgo-search>=7.0.1
 
 # Deployment & Caching
 supervisor==4.2.5
