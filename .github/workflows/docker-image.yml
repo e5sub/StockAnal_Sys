@@ -25,4 +25,4 @@ jobs:
       - name: Push Docker image
         run: |
           docker tag stockanal:latest ghcr.io/${{ github.repository_owner }}/stockanal:latest
-          docker push ghcr.io/${{ github.repository_owner }}/stockanal:latest
+          docker push ghcr.io/${{ github.repository_owner }}/stockanal:latest 
