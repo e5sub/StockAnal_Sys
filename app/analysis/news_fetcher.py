@@ -57,6 +57,8 @@ class NewsFetcher:
                         try:
                             news_data = json.load(f)
                             for item in news_data:
+                                if self._looks_mojibake(f"{item.get('title', '')} {item.get('content', '')}"):
+                                    continue
                                 # 如果有哈希字段就直接使用，否则计算新的哈希
                                 if 'hash' in item:
                                     self.news_hashes.add(item['hash'])
@@ -86,6 +88,30 @@ class NewsFetcher:
         # 规范化：去除多余空白、统一格式
         normalized = ' '.join(str(content).split()).strip()
         return hashlib.md5(normalized.encode('utf-8')).hexdigest()
+
+    def _looks_mojibake(self, text):
+        """判断文本是否像 UTF-8 被错误编码解码后的乱码。"""
+        if not text:
+            return False
+        text = str(text)
+        control_count = sum(1 for char in text if 0x80 <= ord(char) <= 0x9F)
+        suspicious_count = sum(text.count(char) for char in ("ã", "å", "æ", "ç", "è", "é", "ï", "Â", "�"))
+        return control_count >= 3 or suspicious_count >= 6
+
+    def _repair_mojibake(self, text):
+        """尽量修复 latin1/cp1252 误解码的中文文本；不可修复时返回原文。"""
+        if not text or not self._looks_mojibake(text):
+            return text
+
+        text = str(text)
+        for encoding in ("latin1", "cp1252"):
+            try:
+                repaired = text.encode(encoding).decode("utf-8")
+                if not self._looks_mojibake(repaired):
+                    return repaired
+            except UnicodeError:
+                continue
+        return text
 
     def get_news_filename(self, date=None):
         """获取指定日期的新闻文件名"""
@@ -141,7 +167,8 @@ class NewsFetcher:
         response = requests.get("https://m.cls.cn/telegraph", headers=headers, timeout=10)
         response.raise_for_status()
 
-        data_text = self._extract_js_object(response.text, "__NEXT_DATA__ = ")
+        html = response.content.decode("utf-8", errors="replace")
+        data_text = self._extract_js_object(html, "__NEXT_DATA__ = ")
         page_data = json.loads(data_text)
         roll_data = (
             page_data.get("props", {})
@@ -207,8 +234,8 @@ class NewsFetcher:
 
     def _normalize_news_row(self, row, source_name, now):
         """统一不同新闻接口的字段结构。"""
-        title = str(row.get("标题", "") or row.get("新闻标题", "") or "")
-        content = str(row.get("内容", "") or row.get("摘要", "") or row.get("新闻内容", "") or "")
+        title = self._repair_mojibake(str(row.get("标题", "") or row.get("新闻标题", "") or ""))
+        content = self._repair_mojibake(str(row.get("内容", "") or row.get("摘要", "") or row.get("新闻内容", "") or ""))
 
         if not title and content:
             title = content[:80]
@@ -312,6 +339,12 @@ class NewsFetcher:
                 with open(filename, 'r', encoding='utf-8') as f:
                     try:
                         existing_data = json.load(f)
+                        existing_data = [
+                            item for item in existing_data
+                            if not self._looks_mojibake(
+                                f"{item.get('title', '')} {item.get('content', '')}"
+                            )
+                        ]
                         # 合并数据，已经确保news_list中的内容都是新的
                         merged_news = existing_data + news_list
                         # 按时间排序
@@ -354,6 +387,12 @@ class NewsFetcher:
                 try:
                     with open(filename, 'r', encoding='utf-8') as f:
                         data = json.load(f)
+                        data = [
+                            item for item in data
+                            if not self._looks_mojibake(
+                                f"{item.get('title', '')} {item.get('content', '')}"
+                            )
+                        ]
                         news_data.extend(data)
                         processed_dates.append(date_str)
                         logger.info(f"已加载 {date_str} 新闻数据 {len(data)} 条")
