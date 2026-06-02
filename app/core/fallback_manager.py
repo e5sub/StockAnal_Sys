@@ -70,7 +70,7 @@ class FallbackManager:
                     result = method(*args, **kwargs)
 
                     # 检查结果是否有效
-                    if self._is_valid_result(result):
+                    if self._is_valid_result(result, method_name):
                         # 成功，重置失败计数
                         with self._lock:
                             self._fail_count[adapter_name] = 0
@@ -96,7 +96,7 @@ class FallbackManager:
             error_msg += f", 最后错误: {last_error}"
         raise Exception(error_msg)
 
-    def _is_valid_result(self, result: Any) -> bool:
+    def _is_valid_result(self, result: Any, method_name: Optional[str] = None) -> bool:
         """检查结果是否有效"""
         if result is None:
             return False
@@ -104,9 +104,9 @@ class FallbackManager:
             if result.empty:
                 return False
             # 检查K线数据必需列
-            required_cols = {'date', 'open', 'high', 'low', 'close', 'volume'}
-            if required_cols.issubset(set(result.columns)):
-                return True
+            if method_name == 'get_stock_history':
+                required_cols = {'date', 'open', 'high', 'low', 'close', 'volume'}
+                return required_cols.issubset(set(result.columns))
             # 如果不是K线数据但非空，也视为有效
             return len(result.columns) > 0
         if isinstance(result, (list, dict)) and len(result) == 0:
