@@ -1,5 +1,5 @@
 # 使用Python 3.11基础镜像（因为你的依赖包兼容性更好）
-FROM python:3.11
+FROM python:3.11-slim
 
 # 设置工作目录
 WORKDIR /app
