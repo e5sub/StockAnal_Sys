@@ -10,9 +10,11 @@ import json
 import logging
 import time
 import hashlib
-from datetime import datetime, timedelta, date
+import re
+from datetime import datetime, timedelta, date, timezone
 import akshare as ak
 import pandas as pd
+import requests
 
 # 设置日志
 logging.basicConfig(level=logging.INFO,
@@ -93,18 +95,174 @@ class NewsFetcher:
             date = date.strftime('%Y%m%d')
         return os.path.join(self.save_dir, f"news_{date}.json")
 
+    def _extract_js_object(self, html, marker):
+        """从页面脚本中提取 marker 后面的 JSON 对象。"""
+        start = html.find(marker)
+        if start < 0:
+            raise ValueError(f"页面中未找到 {marker}")
+
+        start += len(marker)
+        brace_count = 0
+        in_string = False
+        escaped = False
+
+        for index, char in enumerate(html[start:], start):
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == '"':
+                    in_string = False
+                continue
+
+            if char == '"':
+                in_string = True
+            elif char == "{":
+                brace_count += 1
+            elif char == "}":
+                brace_count -= 1
+                if brace_count == 0:
+                    return html[start:index + 1]
+
+        raise ValueError("未能完整解析财联社页面数据")
+
+    def _fetch_cls_telegraph_df(self):
+        """获取财联社移动端电报页内嵌的最新 roll_data。"""
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/125.0 Safari/537.36"
+            ),
+            "Referer": "https://m.cls.cn/telegraph",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        }
+        response = requests.get("https://m.cls.cn/telegraph", headers=headers, timeout=10)
+        response.raise_for_status()
+
+        data_text = self._extract_js_object(response.text, "__NEXT_DATA__ = ")
+        page_data = json.loads(data_text)
+        roll_data = (
+            page_data.get("props", {})
+            .get("initialState", {})
+            .get("roll_data", [])
+        )
+
+        if not roll_data:
+            return pd.DataFrame()
+
+        shanghai_tz = timezone(timedelta(hours=8))
+        rows = []
+        for item in roll_data:
+            timestamp = item.get("ctime") or item.get("modified_time")
+            if timestamp:
+                publish_dt = datetime.fromtimestamp(int(timestamp), shanghai_tz)
+                pub_date = publish_dt.strftime("%Y-%m-%d")
+                pub_time = publish_dt.strftime("%H:%M:%S")
+            else:
+                pub_date = ""
+                pub_time = ""
+
+            title = item.get("title") or ""
+            content = item.get("content") or item.get("brief") or title
+            rows.append({
+                "标题": title,
+                "内容": content,
+                "发布日期": pub_date,
+                "发布时间": pub_time,
+                "链接": item.get("shareurl") or "",
+                "财联社ID": item.get("id"),
+                "阅读数": item.get("reading_num"),
+                "级别": item.get("level"),
+            })
+
+        return pd.DataFrame(rows)
+
+    def _fetch_news_dataframe(self):
+        """按优先级获取新闻数据，单个AKShare接口失效时自动降级。"""
+        sources = [
+            ("财联社电报", self._fetch_cls_telegraph_df),
+            ("AKShare财联社电报", lambda: ak.stock_info_global_cls(symbol="全部")),
+            ("东方财富全球快讯", lambda: getattr(ak, "stock_info_global_em")()),
+            ("新浪财经全球快讯", lambda: getattr(ak, "stock_info_global_sina")()),
+        ]
+        last_error = None
+
+        for source_name, fetcher in sources:
+            try:
+                logger.info(f"开始获取{source_name}数据")
+                df = fetcher()
+                if df is not None and not df.empty:
+                    logger.info(f"{source_name}数据获取成功: {df.shape}")
+                    return source_name, df
+                logger.warning(f"{source_name}返回空数据，尝试下一个新闻源")
+            except Exception as e:
+                last_error = e
+                logger.warning(f"{source_name}接口失败，尝试下一个新闻源: {type(e).__name__}: {e}")
+
+        if last_error:
+            raise last_error
+        return "", pd.DataFrame()
+
+    def _normalize_news_row(self, row, source_name, now):
+        """统一不同新闻接口的字段结构。"""
+        title = str(row.get("标题", "") or row.get("新闻标题", "") or "")
+        content = str(row.get("内容", "") or row.get("摘要", "") or row.get("新闻内容", "") or "")
+
+        if not title and content:
+            title = content[:80]
+        if not content and title:
+            content = title
+
+        pub_date = row.get("发布日期", "")
+        pub_time = row.get("发布时间", "")
+
+        if not pub_date and source_name.startswith("新浪"):
+            pub_time = row.get("时间", "")
+
+        if isinstance(pub_time, (datetime, date)):
+            pub_time_text = pub_time.isoformat()
+        else:
+            pub_time_text = str(pub_time)
+
+        if isinstance(pub_date, (datetime, date)):
+            pub_date_text = pub_date.isoformat()
+        else:
+            pub_date_text = str(pub_date)
+
+        if not pub_date_text and pub_time_text:
+            parsed_time = pd.to_datetime(pub_time_text, errors='coerce')
+            if not pd.isna(parsed_time):
+                pub_date_text = parsed_time.strftime('%Y-%m-%d')
+                pub_time_text = parsed_time.strftime('%H:%M:%S')
+
+        if not pub_date_text:
+            pub_date_text = now.strftime('%Y-%m-%d')
+        if not pub_time_text:
+            pub_time_text = now.strftime('%H:%M:%S')
+
+        return {
+            "title": title,
+            "content": content,
+            "date": pub_date_text,
+            "time": pub_time_text,
+            "datetime": f"{pub_date_text} {pub_time_text}",
+            "source": source_name,
+            "url": str(row.get("链接", "") or row.get("新闻链接", "") or ""),
+            "fetch_time": now.strftime('%Y-%m-%d %H:%M:%S'),
+        }
+
     def fetch_and_save(self):
         """获取新闻并保存到JSON文件，避免重复内容"""
         try:
             # 获取当前时间
             now = datetime.now()
 
-            # 调用AKShare API获取财联社电报数据
-            logger.info("开始获取财联社电报数据")
-            stock_info_global_cls_df = ak.stock_info_global_cls(symbol="全部")
+            source_name, stock_info_global_cls_df = self._fetch_news_dataframe()
 
             if stock_info_global_cls_df.empty:
-                logger.warning("获取的财联社电报数据为空")
+                logger.warning("获取的新闻数据为空")
                 return False
 
             # 打印DataFrame的信息和类型，帮助调试
@@ -121,9 +279,9 @@ class NewsFetcher:
             for _, row in stock_info_global_cls_df.iterrows():
                 total_count += 1
 
-                # 安全获取内容和标题，确保为字符串
-                content = str(row.get("内容", ""))
-                title = str(row.get("标题", ""))
+                news_item = self._normalize_news_row(row, source_name, now)
+                content = news_item["content"]
+                title = news_item["title"]
 
                 # 组合标题和内容进行去重
                 combined = f"{title}||{content}"
@@ -137,29 +295,8 @@ class NewsFetcher:
                 self.news_hashes.add(content_hash)
                 new_count += 1
 
-                # 安全获取日期和时间，确保为字符串格式
-                pub_date = row.get("发布日期", "")
-                if isinstance(pub_date, (datetime, date)):
-                    pub_date = pub_date.isoformat()
-                else:
-                    pub_date = str(pub_date)
-
-                pub_time = row.get("发布时间", "")
-                if isinstance(pub_time, (datetime, date)):
-                    pub_time = pub_time.isoformat()
-                else:
-                    pub_time = str(pub_time)
-
                 # 创建新闻项并添加哈希值
-                news_item = {
-                    "title": title,
-                    "content": content,
-                    "date": pub_date,
-                    "time": pub_time,
-                    "datetime": f"{pub_date} {pub_time}",
-                    "fetch_time": now.strftime('%Y-%m-%d %H:%M:%S'),
-                    "hash": content_hash  # 保存哈希值以便后续使用
-                }
+                news_item["hash"] = content_hash
                 news_list.append(news_item)
 
             # 如果没有新的新闻，直接返回
