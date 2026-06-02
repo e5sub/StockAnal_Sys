@@ -95,6 +95,70 @@ cache_config = {
     'CACHE_DEFAULT_TIMEOUT': 300
 }
 
+PERSISTED_TASK_TYPES = {'etf_analysis'}
+TASK_STORAGE_DIR = Path(os.getenv('TASK_STORAGE_DIR', 'data/tasks'))
+
+
+def _task_storage_dir(task_type):
+    return TASK_STORAGE_DIR / task_type
+
+
+def _task_file_path(task_type, task_id):
+    return _task_storage_dir(task_type) / f"{task_id}.json"
+
+
+def persist_task(task_type, task):
+    """Persist selected task types so polling survives reloads and multi-worker routing."""
+    if task_type not in PERSISTED_TASK_TYPES or not task:
+        return
+    try:
+        task_dir = _task_storage_dir(task_type)
+        task_dir.mkdir(parents=True, exist_ok=True)
+        with open(_task_file_path(task_type, task['id']), 'w', encoding='utf-8') as f:
+            json.dump(task, f, ensure_ascii=False, default=str)
+    except Exception as e:
+        app.logger.warning(f"持久化任务失败: {task.get('id')} ({task_type}): {e}")
+
+
+def load_persisted_task(task_type, task_id):
+    if task_type not in PERSISTED_TASK_TYPES:
+        return None
+    try:
+        task_file = _task_file_path(task_type, task_id)
+        if not task_file.exists():
+            return None
+        with open(task_file, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception as e:
+        app.logger.warning(f"读取持久化任务失败: {task_id} ({task_type}): {e}")
+        return None
+
+
+def load_persisted_task_by_key(task_type, task_key):
+    if task_type not in PERSISTED_TASK_TYPES or not task_key:
+        return None
+    try:
+        task_dir = _task_storage_dir(task_type)
+        if not task_dir.exists():
+            return None
+        for task_file in task_dir.glob('*.json'):
+            with open(task_file, 'r', encoding='utf-8') as f:
+                task = json.load(f)
+            if task.get('key') == task_key:
+                return task
+    except Exception as e:
+        app.logger.warning(f"按任务键读取持久化任务失败: {task_key} ({task_type}): {e}")
+    return None
+
+
+def restore_task_to_store(task_type, task):
+    if not task:
+        return
+    store = get_task_store(task_type)
+    store[task['id']] = task
+    if task.get('key'):
+        store[task['key']] = task
+
 # 如果配置了Redis，使用Redis作为缓存后端
 if os.getenv('USE_REDIS_CACHE', 'False').lower() == 'true' and os.getenv('REDIS_URL'):
     cache_config = {
@@ -223,6 +287,11 @@ def get_or_create_task(task_type, **params):
     store = get_task_store(task_type)
     task_key = generate_task_key(task_type, **params)
 
+    if task_key and task_key not in store:
+        persisted_task = load_persisted_task_by_key(task_type, task_key)
+        if persisted_task:
+            restore_task_to_store(task_type, persisted_task)
+
     # 检查是否有现有任务
     if task_key and task_key in store:
         task = store[task_key]
@@ -250,6 +319,7 @@ def get_or_create_task(task_type, **params):
         if task_key:
             store[task_key] = task
         store[task_id] = task
+        persist_task(task_type, task)
 
     return task_id, task, True
 
@@ -329,6 +399,7 @@ def update_task_status(task_type, task_id, status, progress=None, result=None, e
             if 'key' in task and task.get('key') and task['key'] in store:
                 store[task['key']] = task
             store[task_id] = task # also save by id
+            persist_task(task_type, task)
 
 
 analysis_tasks = {}
@@ -911,7 +982,11 @@ def get_etf_analysis_status(task_id):
     store = get_task_store('etf_analysis')
     with task_lock:
         if task_id not in store:
-            return jsonify({'error': '找不到指定的ETF分析任务'}), 404
+            persisted_task = load_persisted_task('etf_analysis', task_id)
+            if persisted_task:
+                restore_task_to_store('etf_analysis', persisted_task)
+            else:
+                return jsonify({'error': '找不到指定的ETF分析任务'}), 404
 
         task = store[task_id]
 
