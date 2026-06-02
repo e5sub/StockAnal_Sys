@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 import numpy as np
 from stockstats import StockDataFrame
 import logging
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +32,19 @@ class EtfAnalyzer:
     def _set_cached(self, key, data):
         """设置缓存"""
         self._cache[key] = (datetime.now(), data)
+
+    def _call_with_retries(self, func, *args, retries=3, delay=1.0, **kwargs):
+        """对第三方数据源调用做轻量重试，缓解 SSL EOF/连接中断等瞬时错误。"""
+        last_error = None
+        for attempt in range(1, retries + 1):
+            try:
+                return func(*args, **kwargs)
+            except Exception as e:
+                last_error = e
+                logger.warning(f"数据源调用失败(第{attempt}/{retries}次): {type(e).__name__}: {e}")
+                if attempt < retries:
+                    time.sleep(delay * attempt)
+        raise last_error
 
     def run_analysis(self):
         """
@@ -442,18 +456,29 @@ class EtfAnalyzer:
         print("开始分析持仓...")
         try:
             # 获取ETF持仓明细（带缓存）
-            cache_key = f"holdings_{self.etf_code}_{datetime.now().strftime('%Y')}"
+            current_year = datetime.now().year
+            candidate_years = [str(year) for year in range(current_year, current_year - 3, -1)]
+            cache_key = f"holdings_{self.etf_code}_{'_'.join(candidate_years)}"
             holdings_df = self._get_cached(cache_key)
             if holdings_df is None:
-                try:
-                    holdings_df = ak.fund_portfolio_hold_em(symbol=self.etf_code, date=datetime.now().strftime("%Y"))
-                    if holdings_df is not None and not holdings_df.empty:
-                        self._set_cached(cache_key, holdings_df)
-                    else:
-                        holdings_df = pd.DataFrame()
-                except Exception as e:
-                    logger.warning(f"获取ETF持仓数据失败: {e}")
-                    holdings_df = pd.DataFrame()
+                holdings_df = pd.DataFrame()
+                for year in candidate_years:
+                    try:
+                        yearly_df = self._call_with_retries(
+                            ak.fund_portfolio_hold_em,
+                            symbol=self.etf_code,
+                            date=year,
+                            retries=3,
+                            delay=1.0
+                        )
+                        if yearly_df is not None and not yearly_df.empty:
+                            holdings_df = yearly_df
+                            self._set_cached(cache_key, holdings_df)
+                            logger.info(f"ETF {self.etf_code} 持仓数据获取成功，年份: {year}")
+                            break
+                        logger.warning(f"ETF {self.etf_code} {year} 年持仓数据为空，尝试上一年")
+                    except Exception as e:
+                        logger.warning(f"获取ETF持仓数据失败(code={self.etf_code}, year={year}): {e}")
 
             if holdings_df.empty or '股票代码' not in holdings_df.columns:
                  self.analysis_result['holdings'] = {"error": "未能获取到该ETF的持仓数据。"}
