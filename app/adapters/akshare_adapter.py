@@ -38,6 +38,22 @@ class AkshareAdapter(BaseAdapter):
         prefix = 'sh' if code.startswith('6') else 'sz'
         return f"{prefix}{code}"
 
+    def _normalize_history_df(self, df: pd.DataFrame) -> pd.DataFrame:
+        """统一K线字段，并在缺少成交量时用成交额和收盘价兜底估算。"""
+        if df is None or df.empty:
+            return pd.DataFrame()
+
+        mapping = {k: v for k, v in self.FIELD_MAPPING['stock_zh_a_hist'].items() if k in df.columns}
+        if mapping:
+            df = df.rename(columns=mapping)
+
+        if 'volume' not in df.columns and {'amount', 'close'}.issubset(df.columns):
+            amount = pd.to_numeric(df['amount'], errors='coerce')
+            close = pd.to_numeric(df['close'], errors='coerce').replace(0, pd.NA)
+            df['volume'] = amount / close
+
+        return df
+
     def get_stock_history(self, code: str, start_date: str, end_date: str,
                           adjust: str = "qfq") -> pd.DataFrame:
         """获取股票历史K线 - 东财挂了自动切腾讯"""
@@ -54,11 +70,7 @@ class AkshareAdapter(BaseAdapter):
             df = ak.stock_zh_a_hist(symbol=code, start_date=start_date,
                                     end_date=end_date, adjust=adjust)
             if df is not None and not df.empty:
-                # 只 rename 存在的列
-                mapping = {k: v for k, v in self.FIELD_MAPPING['stock_zh_a_hist'].items() if k in df.columns}
-                if mapping:
-                    df = df.rename(columns=mapping)
-                return df
+                return self._normalize_history_df(df)
         except Exception as e:
             logger.warning(f"akshare东财接口失败(symbol={code}): {type(e).__name__}: {e}")
 
@@ -68,7 +80,7 @@ class AkshareAdapter(BaseAdapter):
             df = ak.stock_zh_a_hist_tx(symbol=tx_code, start_date=start_date,
                                        end_date=end_date, adjust=adjust)
             if df is not None and not df.empty:
-                return df
+                return self._normalize_history_df(df)
         except Exception as e:
             logger.warning(f"akshare腾讯接口失败(symbol={code}): {type(e).__name__}: {e}")
 
