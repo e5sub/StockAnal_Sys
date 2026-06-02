@@ -6,6 +6,10 @@ import numpy as np
 from stockstats import StockDataFrame
 import logging
 import time
+import random
+import re
+import requests
+import html as html_lib
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +49,71 @@ class EtfAnalyzer:
                 if attempt < retries:
                     time.sleep(delay * attempt)
         raise last_error
+
+    def _fetch_holdings_from_eastmoney(self, year):
+        """直接解析东财 F10 持仓接口，作为 AKShare fund_portfolio_hold_em 的兜底。"""
+        url = "https://fundf10.eastmoney.com/FundArchivesDatas.aspx"
+        params = {
+            "type": "jjcc",
+            "code": self.etf_code,
+            "topline": "10000",
+            "year": str(year),
+            "month": "",
+            "rt": f"{random.random():.16f}",
+        }
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36"
+            ),
+            "Referer": f"https://fundf10.eastmoney.com/ccmx_{self.etf_code}.html",
+            "Accept": "application/javascript,text/javascript,*/*;q=0.8",
+        }
+
+        response = self._call_with_retries(
+            requests.get,
+            url,
+            params=params,
+            headers=headers,
+            timeout=15,
+            retries=3,
+            delay=1.0,
+        )
+        response.raise_for_status()
+        response.encoding = response.apparent_encoding or "utf-8"
+
+        match = re.search(r'content:"(?P<content>.*?)"\s*,\s*arryear', response.text, re.S)
+        if not match:
+            return pd.DataFrame()
+
+        content = match.group("content").replace("\\r", "\r").replace("\\n", "\n").replace('\\"', '"')
+        rows = []
+        table_rows = re.findall(r"<tr[^>]*>(.*?)</tr>", content, re.S | re.I)
+        for table_row in table_rows:
+            cells = re.findall(r"<t[dh][^>]*>(.*?)</t[dh]>", table_row, re.S | re.I)
+            parts = []
+            for cell in cells:
+                text = re.sub(r"<[^>]+>", "", cell)
+                text = html_lib.unescape(text).replace("\xa0", " ").strip()
+                parts.append(text)
+
+            if len(parts) < 9 or not parts[0].isdigit():
+                continue
+
+            rows.append({
+                "股票代码": parts[1].strip(),
+                "股票名称": parts[2].strip(),
+                "占净值比例": parts[-3].replace("%", "").strip(),
+                "持股数": parts[-2].replace(",", "").strip(),
+                "持仓市值": parts[-1].replace(",", "").strip(),
+            })
+
+        if not rows:
+            return pd.DataFrame()
+
+        df = pd.DataFrame(rows)
+        df["持仓市值"] = pd.to_numeric(df["持仓市值"], errors="coerce")
+        return df
 
     def run_analysis(self):
         """
@@ -479,6 +548,17 @@ class EtfAnalyzer:
                         logger.warning(f"ETF {self.etf_code} {year} 年持仓数据为空，尝试上一年")
                     except Exception as e:
                         logger.warning(f"获取ETF持仓数据失败(code={self.etf_code}, year={year}): {e}")
+
+                    try:
+                        yearly_df = self._fetch_holdings_from_eastmoney(year)
+                        if yearly_df is not None and not yearly_df.empty:
+                            holdings_df = yearly_df
+                            self._set_cached(cache_key, holdings_df)
+                            logger.info(f"ETF {self.etf_code} 东财原始接口持仓数据获取成功，年份: {year}")
+                            break
+                        logger.warning(f"ETF {self.etf_code} 东财原始接口 {year} 年持仓数据为空，尝试上一年")
+                    except Exception as e:
+                        logger.warning(f"东财原始接口获取ETF持仓失败(code={self.etf_code}, year={year}): {e}")
 
             if holdings_df.empty or '股票代码' not in holdings_df.columns:
                  self.analysis_result['holdings'] = {"error": "未能获取到该ETF的持仓数据。"}
