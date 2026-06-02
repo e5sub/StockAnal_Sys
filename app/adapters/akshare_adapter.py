@@ -10,6 +10,7 @@ Pos: app/adapters层，作为主数据源适配器被fallback_manager调度
 import akshare as ak
 import pandas as pd
 import logging
+import time
 from typing import List, Dict, Optional
 from .base_adapter import BaseAdapter
 
@@ -31,6 +32,23 @@ class AkshareAdapter(BaseAdapter):
     @property
     def name(self) -> str:
         return "akshare"
+
+    def _call_with_retries(self, func, *args, retries: int = 3, delay: float = 0.8,
+                           context: str = "", **kwargs):
+        last_error = None
+        for attempt in range(1, retries + 1):
+            try:
+                return func(*args, **kwargs)
+            except Exception as e:
+                last_error = e
+                if attempt < retries:
+                    suffix = f" ({context})" if context else ""
+                    logger.warning(
+                        f"akshare request failed{suffix}, retry {attempt}/{retries}: "
+                        f"{type(e).__name__}: {e}"
+                    )
+                    time.sleep(delay * attempt)
+        raise last_error
 
     def _format_code_for_tx(self, code: str) -> str:
         """转换股票代码为腾讯格式：000001 -> sz000001"""
@@ -188,7 +206,11 @@ class AkshareAdapter(BaseAdapter):
     def get_industry_stocks(self, industry: str) -> List[str]:
         """获取行业成分股"""
         try:
-            df = ak.stock_board_industry_cons_em(symbol=industry)
+            df = self._call_with_retries(
+                ak.stock_board_industry_cons_em,
+                symbol=industry,
+                context=f"industry_cons:{industry}",
+            )
             if df is not None and not df.empty:
                 col = '代码' if '代码' in df.columns else df.columns[0]
                 return df[col].tolist()
@@ -200,7 +222,11 @@ class AkshareAdapter(BaseAdapter):
         """获取概念板块成分股代码列表"""
         # 先尝试概念板块
         try:
-            df = ak.stock_board_concept_cons_em(symbol=concept)
+            df = self._call_with_retries(
+                ak.stock_board_concept_cons_em,
+                symbol=concept,
+                context=f"concept_cons:{concept}",
+            )
             if df is not None and not df.empty:
                 col = '代码' if '代码' in df.columns else df.columns[0]
                 return df[col].tolist()
@@ -209,7 +235,11 @@ class AkshareAdapter(BaseAdapter):
 
         # 概念失败，尝试行业板块
         try:
-            df = ak.stock_board_industry_cons_em(symbol=concept)
+            df = self._call_with_retries(
+                ak.stock_board_industry_cons_em,
+                symbol=concept,
+                context=f"industry_cons:{concept}",
+            )
             if df is not None and not df.empty:
                 col = '代码' if '代码' in df.columns else df.columns[0]
                 return df[col].tolist()
@@ -222,7 +252,11 @@ class AkshareAdapter(BaseAdapter):
         """获取概念板块成分股详细信息（含名称、价格等）"""
         # 先尝试概念板块
         try:
-            df = ak.stock_board_concept_cons_em(symbol=concept)
+            df = self._call_with_retries(
+                ak.stock_board_concept_cons_em,
+                symbol=concept,
+                context=f"concept_cons_detail:{concept}",
+            )
             if df is not None and not df.empty:
                 return self._parse_board_stocks_df(df)
         except Exception as e:
@@ -230,7 +264,11 @@ class AkshareAdapter(BaseAdapter):
 
         # 概念失败，尝试行业板块
         try:
-            df = ak.stock_board_industry_cons_em(symbol=concept)
+            df = self._call_with_retries(
+                ak.stock_board_industry_cons_em,
+                symbol=concept,
+                context=f"industry_cons_detail:{concept}",
+            )
             if df is not None and not df.empty:
                 return self._parse_board_stocks_df(df)
         except Exception as e:
